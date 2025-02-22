@@ -8,6 +8,10 @@ Most devs focus on retrieval but skip the foundation: 𝗘𝗺𝗯𝗲𝗱𝗱�
 
 Miss this, and your system fails—hallucinations, slow search, irrelevant results.
 
+
+![1740220215758](https://github.com/user-attachments/assets/5a19b03c-fa16-4d2c-927c-7bbb9c881fe5)
+
+
 𝗪𝗵𝗮𝘁 𝗔𝗿𝗲 𝗘𝗺𝗯𝗲𝗱𝗱𝗶𝗻𝗴𝘀?
 
 They convert text into dense numerical vectors that capture meaning.
