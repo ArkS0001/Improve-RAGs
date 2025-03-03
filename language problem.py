@@ -1,3 +1,7 @@
+#pip install nltk PyPDF2 pypdfium2 pillow transformers sentence-transformers rank_bm25 langdetect
+
+
+
 import os
 import warnings
 import torch
