@@ -41,7 +41,6 @@ def extract_text_from_pdf(pdf_path):
             sentences = nltk.sent_tokenize(page_text)
             for i, sentence in enumerate(sentences):
                 if sentence.strip():
-                    # Detect language (if detection fails, mark as "unknown")
                     try:
                         lang = detect(sentence)
                     except Exception:
@@ -103,6 +102,10 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
     Performs hybrid search using in-memory storage, retrieving additional surrounding sentences for context.
     Filters results by language so that a German query returns only German sentences.
     
+    Fallbacks:
+      - Sentences with language 'unknown' are always included.
+      - If no sentences are found matching the language filter, a fallback search ignoring language is run.
+    
     Args:
         query (str): User's search query.
         top_k (int): Number of top results to return.
@@ -115,29 +118,37 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
     try:
         query_lang = detect(query)
         print(f"Query detected language: {query_lang}")
-    except Exception as e:
+    except Exception:
         query_lang = None
         print("Could not detect language for query.")
     
     query_embedding = embedding_model.encode([query]).tolist()[0]
 
-    # Compute dense distances for all sentence embeddings that match query language
-    distances = []
-    for uid, emb in sentence_embeddings.items():
-        meta = sentence_metadata[uid]
-        if filter_doc and meta["document"] != filter_doc:
-            continue
-        # Only consider sentences matching the query language
-        if query_lang and meta.get("language") != query_lang:
-            continue
-        dist = np.linalg.norm(np.array(emb) - np.array(query_embedding))
-        distances.append((uid, dist))
-    
+    # Function to search sentences with an option to filter by language
+    def search_sentences(use_language_filter=True):
+        distances = []
+        for uid, emb in sentence_embeddings.items():
+            meta = sentence_metadata[uid]
+            if filter_doc and meta["document"] != filter_doc:
+                continue
+            if use_language_filter and query_lang:
+                # Include sentence if language matches or is unknown
+                if meta.get("language") != "unknown" and meta.get("language") != query_lang:
+                    continue
+            dist = np.linalg.norm(np.array(emb) - np.array(query_embedding))
+            distances.append((uid, dist))
+        return distances
+
+    distances = search_sentences(use_language_filter=True)
+
+    # Fallback: if no results, try without language filter.
     if not distances:
-        print("No matching sentences found for the query's language.")
-        return []
-    
-    # Sort by distance (lower is better)
+        print("No matching sentences found with language filter. Falling back to search without language filtering.")
+        distances = search_sentences(use_language_filter=False)
+        if not distances:
+            print("No sentences available for search.")
+            return []
+
     distances.sort(key=lambda x: x[1])
     top_ids = [uid for uid, _ in distances[:top_k]]
 
@@ -157,7 +168,7 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
 
         full_text = " ".join(context_text)
 
-        # Find the original distance for scoring
+        # Retrieve the original distance for scoring
         dist = next(d for (uid_d, d) in distances if uid_d == uid)
         best_results.append({
             "text": full_text,
