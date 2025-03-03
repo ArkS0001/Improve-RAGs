@@ -101,14 +101,19 @@ def store_pdf_embeddings(pdf_path):
         document_embeddings[doc_name] = doc_embedding
         print(f"Stored document embedding for {doc_name}")
 
+
 def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
     """
-    Performs hybrid search using in-memory storage, retrieving additional surrounding sentences for context.
-    Filters results by language so that a German query returns only German sentences.
+    Performs hybrid search combining dense and sparse retrieval using in-memory storage.
+    Incorporates language detection (with fallback) and contextual sentence retrieval,
+    along with scoring and ranking functionalities.
     
-    Fallbacks:
-      - Sentences with language 'unknown' are always included.
-      - If no sentences are found matching the language filter, a fallback search ignoring language is run.
+    The function:
+      - Detects the language of the query and filters sentences based on it (allowing language 'unknown').
+      - Computes dense distances via query embeddings and retrieves an initial candidate pool.
+      - Builds a BM25 model on candidate texts to compute sparse relevance scores.
+      - Normalizes both dense and sparse scores and combines them (70% dense, 30% sparse).
+      - Extracts surrounding context sentences from the same document/page for each top candidate.
     
     Args:
         query (str): User's search query.
@@ -117,35 +122,42 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
         context_window (int): Number of sentences before and after the main hit to include as context.
     
     Returns:
-        list: A list of dictionaries containing text, page number, document name, and retrieval score.
+        list: A list of dictionaries containing:
+              - text: The full text (main sentence plus context).
+              - page: The page number.
+              - document: The document name.
+              - type: The sentence type.
+              - score: The final hybrid score.
     """
+    # Detect query language
     try:
         query_lang = detect(query)
         print(f"Query detected language: {query_lang}")
     except Exception:
         query_lang = None
         print("Could not detect language for query.")
-    
+
+    # Compute query embedding
     query_embedding = embedding_model.encode([query]).tolist()[0]
 
-    # Function to search sentences with an option to filter by language
+    # Helper: search sentences with optional language filtering
     def search_sentences(use_language_filter=True):
-        distances = []
+        results = []
         for uid, emb in sentence_embeddings.items():
             meta = sentence_metadata[uid]
             if filter_doc and meta["document"] != filter_doc:
                 continue
             if use_language_filter and query_lang:
-                # Include sentence if language matches or is unknown
+                # Skip sentences that do not match the query language (unless language is 'unknown')
                 if meta.get("language") != "unknown" and meta.get("language") != query_lang:
                     continue
+            # Compute Euclidean distance as dense retrieval score
             dist = np.linalg.norm(np.array(emb) - np.array(query_embedding))
-            distances.append((uid, dist))
-        return distances
+            results.append((uid, dist))
+        return results
 
+    # Run dense retrieval with language filtering
     distances = search_sentences(use_language_filter=True)
-
-    # Fallback: if no results, try without language filter.
     if not distances:
         print("No matching sentences found with language filter. Falling back to search without language filtering.")
         distances = search_sentences(use_language_filter=False)
@@ -153,36 +165,75 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
             print("No sentences available for search.")
             return []
 
+    # Sort dense retrieval results (lower distance is better)
     distances.sort(key=lambda x: x[1])
-    top_ids = [uid for uid, _ in distances[:top_k]]
-
+    
+    # Build candidate pool for BM25 (e.g., twice as many as top_k)
+    candidate_pool_size = top_k * 2 if len(distances) >= top_k * 2 else len(distances)
+    candidate_ids = [uid for uid, _ in distances[:candidate_pool_size]]
+    
+    # Prepare texts for BM25
+    candidate_texts = [sentence_metadata[uid]["text"] for uid in candidate_ids]
+    if not candidate_texts:
+        print("No texts retrieved for BM25.")
+        return []
+    
+    tokenized_docs = [word_tokenize(text.lower()) for text in candidate_texts]
+    bm25 = BM25Okapi(tokenized_docs)
+    tokenized_query = word_tokenize(query.lower())
+    sparse_scores = np.array(bm25.get_scores(tokenized_query))
+    
+    # Prepare dense scores for candidates from pre-computed distances
+    candidate_dense_dists = []
+    for uid in candidate_ids:
+        dist = next(d for (id_d, d) in distances if id_d == uid)
+        candidate_dense_dists.append(dist)
+    candidate_dense_dists = np.array(candidate_dense_dists)
+    
+    # Normalize dense scores (convert distances to similarity values in [0,1])
+    max_dense = np.max(candidate_dense_dists) if np.max(candidate_dense_dists) > 0 else 1
+    dense_scores = 1 - (candidate_dense_dists / max_dense)
+    
+    # Normalize sparse scores
+    max_sparse = np.max(sparse_scores) if np.max(sparse_scores) > 0 else 1
+    sparse_scores_norm = sparse_scores / max_sparse
+    
+    # Combine scores: 70% dense, 30% sparse
+    hybrid_scores = 0.7 * dense_scores + 0.3 * sparse_scores_norm
+    
+    # Re-rank candidates based on combined hybrid score (higher is better)
+    sorted_indices = np.argsort(hybrid_scores)[::-1]
+    
     best_results = []
-    for uid in top_ids:
+    for i in sorted_indices[:top_k]:
+        uid = candidate_ids[i]
         meta = sentence_metadata[uid]
         doc_name = meta["document"]
-        page = meta["page"]
-        sentence_id = int(uid.split("_")[-1])  # Extract sentence ID
-
-        # Retrieve additional sentences from the same page for context
-        context_text = []
+        page = meta.get("page", None)
+        # Extract sentence index from uid; assumes format like "document_page_sentenceid"
+        try:
+            sentence_id = int(uid.split("_")[-1])
+        except Exception:
+            sentence_id = 0
+        
+        # Retrieve context sentences from the same document and page
+        context_texts = []
         for offset in range(-context_window, context_window + 1):
-            neighbor_id = f"{doc_name}_{page}_{sentence_id + offset}"
-            if neighbor_id in sentence_metadata:
-                context_text.append(sentence_metadata[neighbor_id]["text"])
-
-        full_text = " ".join(context_text)
-
-        # Retrieve the original distance for scoring
-        dist = next(d for (uid_d, d) in distances if uid_d == uid)
+            neighbor_uid = f"{doc_name}_{page}_{sentence_id + offset}"
+            if neighbor_uid in sentence_metadata:
+                context_texts.append(sentence_metadata[neighbor_uid]["text"])
+        full_text = " ".join(context_texts)
+        
         best_results.append({
             "text": full_text,
             "page": page,
             "document": doc_name,
-            "type": "sentence",
-            "score": 1.0 / (dist + 1e-10)  # Inverse distance as score
+            "type": meta.get("type", "sentence"),
+            "score": hybrid_scores[i]
         })
-
+    
     return best_results
+
 
 # PDF Rendering Functions
 def get_total_pages(pdf_path):
@@ -206,17 +257,35 @@ def render_page(pdf_path, page_number, scale=1.0, output_path=None):
     pdf.close()
     return pil_image
 
+# def process_specific_page(pdf_path, page_number, scale=7.5, output_dir="rendered_page"):
+#     """
+#     Render and scale only the specified page of the PDF.
+#     """
+#     total_pages = get_total_pages(pdf_path)
+#     if page_number < 0 or page_number >= total_pages:
+#         print(f"Page number {page_number + 1} is out of range. Total pages: {total_pages}")
+#         return None
+#     os.makedirs(output_dir, exist_ok=True)
+#     output_path = os.path.join(output_dir, f"scaled_page_{page_number + 1}.png")
+#     return render_page(pdf_path, page_number, scale=scale, output_path=output_path)
+
 def process_specific_page(pdf_path, page_number, scale=7.5, output_dir="rendered_page"):
     """
     Render and scale only the specified page of the PDF.
+    Saves the image with the document name and page number.
     """
     total_pages = get_total_pages(pdf_path)
     if page_number < 0 or page_number >= total_pages:
         print(f"Page number {page_number + 1} is out of range. Total pages: {total_pages}")
         return None
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"scaled_page_{page_number + 1}.png")
+    
+    # Extract document name without extension
+    doc_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    output_path = os.path.join(output_dir, f"{doc_name}_page_{page_number + 1}.png")
+    
     return render_page(pdf_path, page_number, scale=scale, output_path=output_path)
+
 
 # Setup the Text-Generation Pipeline
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -264,7 +333,7 @@ while True:
         for res in best_results:
             pdf_path = next((path for path in pdf_files if os.path.basename(path) == res["document"]), None)
             if pdf_path:
-                process_specific_page(pdf_path, res["page"] - 1, scale=7.5)
+                process_specific_page(pdf_path, res["page"] - 1, scale=10.0)
 
     user_prompt = input("Enter additional prompt for text generation (or press Enter to skip): ").strip()
     if user_prompt:
