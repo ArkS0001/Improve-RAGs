@@ -1,5 +1,3 @@
-#pip install langdetect
-
 import os
 import warnings
 import torch
@@ -26,13 +24,14 @@ nltk.download('punkt')
 embedding_model = SentenceTransformer("nomic-ai/nomic-embed-text-v2-moe", trust_remote_code=True)
 
 # In-memory storage for embeddings and metadata
-sentence_embeddings = {}  # {id: embedding}
-sentence_metadata = {}    # {id: {"text": str, "page": int, "document": str, "language": str}}
+sentence_embeddings = {}  # {uid: embedding}
+sentence_metadata = {}    # {uid: {"text": str, "page": int, "document": str, "language": str}}
 document_embeddings = {}  # {doc_name: embedding}
 
 def extract_text_from_pdf(pdf_path):
     """
-    Extracts text from each page of the PDF and returns a list of entries with text, page number, sentence ID, and language.
+    Extracts text from each page of the PDF and returns a list of entries with text, page number,
+    sentence ID, and detected language.
     """
     reader = PyPDF2.PdfReader(pdf_path)
     page_entries = []
@@ -78,6 +77,10 @@ def store_pdf_embeddings(pdf_path):
             pickle.dump({"pdf_entries": pdf_entries, "embeddings": embeddings}, f)
         print(f"Computed and cached embeddings for {doc_name}")
     
+    # Debug: print detected languages for each sentence
+    for entry in pdf_entries:
+        print(f"Sentence: {entry['text'][:50]}... | Detected Language: {entry.get('language', 'unknown')}")
+    
     # Store in memory
     for i, entry in enumerate(pdf_entries):
         uid = f"{doc_name}_{entry['page']}_{entry['sentence_id']}"
@@ -109,15 +112,16 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
     Returns:
         list: A list of dictionaries containing text, page number, document name, and retrieval score.
     """
-    # Detect the query language
     try:
         query_lang = detect(query)
-    except Exception:
+        print(f"Query detected language: {query_lang}")
+    except Exception as e:
         query_lang = None
+        print("Could not detect language for query.")
     
     query_embedding = embedding_model.encode([query]).tolist()[0]
 
-    # Compute dense distances for all sentence embeddings that match query language (and document filter if provided)
+    # Compute dense distances for all sentence embeddings that match query language
     distances = []
     for uid, emb in sentence_embeddings.items():
         meta = sentence_metadata[uid]
@@ -130,6 +134,7 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
         distances.append((uid, dist))
     
     if not distances:
+        print("No matching sentences found for the query's language.")
         return []
     
     # Sort by distance (lower is better)
@@ -145,7 +150,7 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
 
         # Retrieve additional sentences from the same page for context
         context_text = []
-        for offset in range(-context_window, context_window + 1):  # sentences before and after
+        for offset in range(-context_window, context_window + 1):
             neighbor_id = f"{doc_name}_{page}_{sentence_id + offset}"
             if neighbor_id in sentence_metadata:
                 context_text.append(sentence_metadata[neighbor_id]["text"])
@@ -153,7 +158,6 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
         full_text = " ".join(context_text)
 
         # Find the original distance for scoring
-        # (Since we sorted distances, we can look it up)
         dist = next(d for (uid_d, d) in distances if uid_d == uid)
         best_results.append({
             "text": full_text,
@@ -165,7 +169,7 @@ def hybrid_search(query, top_k=3, filter_doc=None, context_window=2):
 
     return best_results
 
-# PDF Rendering Functions remain unchanged
+# PDF Rendering Functions
 def get_total_pages(pdf_path):
     """Return the total number of pages in the PDF using PyPDF2."""
     reader = PyPDF2.PdfReader(pdf_path)
@@ -209,7 +213,7 @@ pipe = pipeline(
     device=device,
 )
 
-# Process and Store PDFs (list of PDF paths)
+# Process and Store PDFs
 pdf_files = [
     "C:/Users/alukkib/Documents/Hybrid RAG/AutomotiveSPICE_PAM_31.pdf",
     "C:/Users/alukkib/Documents/Hybrid RAG/Automotive_SPICE_PAM_30 1.pdf",
@@ -239,7 +243,7 @@ while True:
         print(f"Score: {res['score']:.4f}")
         print("-" * 50)
 
-    # Optionally, show rendered page images
+    # Optionally, show the rendered page as an image
     show_image = input("Would you like to see the retrieved page as an image? (yes/no): ").strip().lower()
     if show_image == "yes":
         for res in best_results:
