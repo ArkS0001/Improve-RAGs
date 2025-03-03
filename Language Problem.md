@@ -1,3 +1,6 @@
+https://chatgpt.com/share/67c52f3c-0dcc-8000-806a-098c1470a3c6
+
+
 It sounds like your RAG system is “mixing” German and English documents because the embeddings from your PDF chunks aren’t being clearly separated by language. In other words, the vector space might be too “collided” across languages, so a German query ends up matching an English PDF. Here are a few approaches to address this issue:
 
 • **Separate or tag your documents by language:**  
