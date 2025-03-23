@@ -8,6 +8,8 @@ Most devs focus on retrieval but skip the foundation: 𝗘𝗺𝗯𝗲𝗱𝗱�
 
 Miss this, and your system fails—hallucinations, slow search, irrelevant results.
 
+![1742036442604](https://github.com/user-attachments/assets/9f670d1e-5902-406c-ad0a-46fece37eca2)
+
 
 ![1740220215758](https://github.com/user-attachments/assets/5a19b03c-fa16-4d2c-927c-7bbb9c881fe5)
 
